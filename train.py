@@ -10,8 +10,8 @@ import torch.multiprocessing as mp
 import numpy as np
 import random
 
-from trellis import models, datasets, trainers
-from trellis.utils.dist_utils import setup_dist
+from trellis2 import models, datasets, trainers
+from trellis2.utils.dist_utils import setup_dist
 
 
 def find_ckpt(cfg):

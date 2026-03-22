@@ -1,57 +1,48 @@
 import os
-# os.environ['ATTN_BACKEND'] = 'xformers'   # Can be 'flash-attn' or 'xformers', default is 'flash-attn'
-os.environ['SPCONV_ALGO'] = 'native'        # Can be 'native' or 'auto', default is 'auto'.
-                                            # 'auto' is faster but will do benchmarking at the beginning.
-                                            # Recommended to set to 'native' if run only once.
-
+os.environ['OPENCV_IO_ENABLE_OPENEXR'] = '1'
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"  # Can save GPU memory
+import cv2
 import imageio
 from PIL import Image
-from trellis.pipelines import TrellisImageTo3DPipeline
-from trellis.utils import render_utils, postprocessing_utils
+import torch
+from trellis2.pipelines import Trellis2ImageTo3DPipeline
+from trellis2.utils import render_utils
+from trellis2.renderers import EnvMap
+import o_voxel
 
-# Load a pipeline from a model folder or a Hugging Face model hub.
-pipeline = TrellisImageTo3DPipeline.from_pretrained("microsoft/TRELLIS-image-large")
+# 1. Setup Environment Map
+envmap = EnvMap(torch.tensor(
+    cv2.cvtColor(cv2.imread('assets/hdri/forest.exr', cv2.IMREAD_UNCHANGED), cv2.COLOR_BGR2RGB),
+    dtype=torch.float32, device='cuda'
+))
+
+# 2. Load Pipeline
+pipeline = Trellis2ImageTo3DPipeline.from_pretrained("microsoft/TRELLIS.2-4B")
 pipeline.cuda()
 
-# Load an image
+# 3. Load Image & Run
 image = Image.open("assets/example_image/T.png")
+mesh = pipeline.run(image)[0]
+mesh.simplify(16777216) # nvdiffrast limit
 
-# Run the pipeline
-outputs = pipeline.run(
-    image,
-    seed=1,
-    # Optional parameters
-    # sparse_structure_sampler_params={
-    #     "steps": 12,
-    #     "cfg_strength": 7.5,
-    # },
-    # slat_sampler_params={
-    #     "steps": 12,
-    #     "cfg_strength": 3,
-    # },
+# 4. Render Video
+video = render_utils.make_pbr_vis_frames(render_utils.render_video(mesh, envmap=envmap))
+imageio.mimsave("sample.mp4", video, fps=15)
+
+# 5. Export to GLB
+glb = o_voxel.postprocess.to_glb(
+    vertices            =   mesh.vertices,
+    faces               =   mesh.faces,
+    attr_volume         =   mesh.attrs,
+    coords              =   mesh.coords,
+    attr_layout         =   mesh.layout,
+    voxel_size          =   mesh.voxel_size,
+    aabb                =   [[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
+    decimation_target   =   1000000,
+    texture_size        =   4096,
+    remesh              =   True,
+    remesh_band         =   1,
+    remesh_project      =   0,
+    verbose             =   True
 )
-# outputs is a dictionary containing generated 3D assets in different formats:
-# - outputs['gaussian']: a list of 3D Gaussians
-# - outputs['radiance_field']: a list of radiance fields
-# - outputs['mesh']: a list of meshes
-
-# Render the outputs
-video = render_utils.render_video(outputs['gaussian'][0])['color']
-imageio.mimsave("sample_gs.mp4", video, fps=30)
-video = render_utils.render_video(outputs['radiance_field'][0])['color']
-imageio.mimsave("sample_rf.mp4", video, fps=30)
-video = render_utils.render_video(outputs['mesh'][0])['normal']
-imageio.mimsave("sample_mesh.mp4", video, fps=30)
-
-# GLB files can be extracted from the outputs
-glb = postprocessing_utils.to_glb(
-    outputs['gaussian'][0],
-    outputs['mesh'][0],
-    # Optional parameters
-    simplify=0.95,          # Ratio of triangles to remove in the simplification process
-    texture_size=1024,      # Size of the texture used for the GLB
-)
-glb.export("sample.glb")
-
-# Save Gaussians as PLY files
-outputs['gaussian'][0].save_ply("sample.ply")
+glb.export("sample.glb", extension_webp=True)
